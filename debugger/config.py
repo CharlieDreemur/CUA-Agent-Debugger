@@ -2,7 +2,7 @@
 Debugger configuration loader.
 
 Configuration is read from ``debugger/config/debugger.json`` when present,
-with safe defaults for the sample data included in this repository. API keys
+with safe defaults for optional trajectories under ``results/input_trajectory``. API keys
 are never read from JSON config files; set provider-specific environment
 variables such as ``OPENAI_API_KEY`` or ``ANTHROPIC_API_KEY`` instead.
 """
@@ -20,11 +20,11 @@ _DEFAULTS = {
     "provider": "openai",
     "model": "gpt-4o-mini",
     "base_urls": {},
-    "trajectory_dir": "sample_data/trajectories",
-    "output_dir": "sample_data/debugger_results",
+    "trajectory_dir": "results/input_trajectory",
+    "output_dir": "results/debugger_results",
     "workers": 1,
     "skip_existing": True,
-    "trial_name": "sample",
+    "trial_name": "claude-sonnet-4-5-20250929_50steps",
     "rca_thinking_budget": 16000,
     "rca_max_tokens": 16000,
     "rca_max_turns": 60,

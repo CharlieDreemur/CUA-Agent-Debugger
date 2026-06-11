@@ -24,9 +24,9 @@ API keys must be set through environment variables, never committed in JSON file
 
 ```bash
 python -m debugger \
-  --trajectory-dir sample_data/trajectories \
-  --output-dir sample_data/debugger_results \
-  --trial-name sample \
+  --trajectory-dir results/input_trajectory/claude-sonnet-4-5-20250929_50steps \
+  --output-dir results/debugger_results \
+  --trial-name claude-sonnet-4-5-20250929_50steps \
   --provider openai \
   --model gpt-4o-mini
 ```
@@ -34,7 +34,7 @@ python -m debugger \
 ## Result Layout
 
 ```text
-sample_data/debugger_results/
+results/debugger_results/
   <trial_name>/
     annotations/
     <debugger_model>/
@@ -55,6 +55,6 @@ Pass the debugger subdirectory, not the agent-level directory:
 
 ```python
 from debugger.eval import quick_acc, compute_accuracy
-quick_acc("sample_data/debugger_results/sample/gpt-4o-mini")
-compute_accuracy("sample_data/debugger_results/sample/gpt-4o-mini")
+quick_acc("results/debugger_results/<trial>/<debugger>")
+compute_accuracy("results/debugger_results/<trial>/<debugger>")
 ```

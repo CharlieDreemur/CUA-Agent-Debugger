@@ -2,7 +2,7 @@
 
 Task IDs are read from ``human_*.json`` annotation files and intersected
 with trajectory directories discovered under the configured trajectory root.
-The default paths point at this repository's synthetic sample data; pass
+The default annotation path points under ``results/debugger_results``; pass
 explicit paths for real experiments.
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 from debugger.config import load_config
 from debugger.pipeline.classify import discover_trajectories
 
-ANNOTATIONS_DIR = Path("sample_data/debugger_results/sample/annotations")
+ANNOTATIONS_DIR = Path("results/debugger_results/annotations")
 
 _cfg = load_config()
 

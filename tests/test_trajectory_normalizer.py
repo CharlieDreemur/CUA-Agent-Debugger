@@ -311,7 +311,7 @@ from pathlib import Path as _Path
 
 # Optional path to an external trajectory with coordinate mismatch.
 _SAMPLE_TRAJ = _Path(__file__).resolve().parent.parent / (
-    "sample_data/optional_external_coordinate_mismatch/task"
+    "results/input_trajectory/optional_external_coordinate_mismatch/task"
 )
 
 
