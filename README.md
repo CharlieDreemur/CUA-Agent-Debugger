@@ -39,6 +39,56 @@ Launch the annotation UI:
 streamlit run debugger/vis/debugger_app.py
 ```
 
+## Optional Input Trajectories
+
+The repository includes only tiny synthetic sample data. To run the debugger on the optional Claude 50-step OSWorld-Verified trajectories, download the archive from Hugging Face:
+
+```text
+https://huggingface.co/datasets/xlangai/ubuntu_osworld_verified_trajs/blob/main/claude-sonnet-4-5-20250929_50steps.zip
+```
+
+The file is large, about 5.38 GB before extraction. Use the included downloader to stream the zip to disk and unzip it under `results/input_trajectory`:
+
+```bash
+python scripts/download_input_trajectory.py
+```
+
+By default this writes:
+
+```text
+results/input_trajectory/claude-sonnet-4-5-20250929_50steps.zip
+```
+
+and extracts the contents into:
+
+```text
+results/input_trajectory/
+```
+
+Useful options:
+
+```bash
+# Download only, without unzipping
+python scripts/download_input_trajectory.py --no-extract
+
+# Re-download even if the zip already exists
+python scripts/download_input_trajectory.py --force
+
+# Delete the zip after successful extraction
+python scripts/download_input_trajectory.py --delete-zip
+```
+
+After extraction, point the debugger at the extracted trajectory folder. If the zip creates a top-level `claude-sonnet-4-5-20250929_50steps/` directory, run:
+
+```bash
+python -m debugger \
+  --trajectory-dir results/input_trajectory/claude-sonnet-4-5-20250929_50steps \
+  --output-dir results/debugger_results \
+  --trial-name claude-sonnet-4-5-20250929_50steps \
+  --provider openai \
+  --model gpt-4o-mini
+```
+
 ## Running RCA
 
 Copy the example config and edit paths/model settings:
