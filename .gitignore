@@ -14,12 +14,18 @@ venv/
 debugger/config/debugger.json
 
 # Runtime outputs
-results/
+results/*
+!results/debugger_results/
+results/debugger_results/*
+!results/debugger_results/claude-sonnet-4-5-20250929_50steps/
+results/debugger_results/claude-sonnet-4-5-20250929_50steps/*
+!results/debugger_results/claude-sonnet-4-5-20250929_50steps/annotations/
+!results/debugger_results/claude-sonnet-4-5-20250929_50steps/annotations/*.json
+!results/debugger_results/claude-sonnet-4-5-20250929_50steps/annotation_agreement.json
+!results/debugger_results/claude-sonnet-4-5-20250929_50steps/annotation_assignments.json
+!results/debugger_results/claude-sonnet-4-5-20250929_50steps/classification.json
 logs/
 analysis_results/
-sample_data/debugger_results/*/*/discussions/
-sample_data/debugger_results/*/*/summary.json
-sample_data/debugger_results/*/*/episodic.json
 
 # Large/generated artifacts intentionally excluded from the minimal release
 *.log

@@ -8,6 +8,7 @@ This repository does not vendor OSWorld runtime code, VM providers, third-party 
 
 - `debugger/`: RCA pipeline, trajectory loading, taxonomy, evaluation, memory helpers, and annotation UI.
 - `debugger/vis/debugger_app.py`: Streamlit app for inspecting RCA outputs and human annotations.
+- `results/debugger_results/claude-sonnet-4-5-20250929_50steps/annotations/`: Claude 50-step human/debugger annotation JSONs and annotation summary metadata.
 - `tests/`: focused unit tests for the minimal release.
 - `scripts/download_input_trajectory.py`: optional downloader/unzip helper for public input trajectories.
 
@@ -15,8 +16,18 @@ This repository does not vendor OSWorld runtime code, VM providers, third-party 
 
 - OSWorld runtime and VM management code.
 - Third-party agent runner implementations.
-- Full paper experiment trajectories and results.
+- Full paper experiment trajectories, rerollouts, and model RCA outputs.
 - Private API keys, private base URLs, or local config files.
+
+## Included Annotations
+
+This minimal release includes only the Claude 50-step annotation set under:
+
+```text
+results/debugger_results/claude-sonnet-4-5-20250929_50steps/
+```
+
+The tracked files are `annotations/*.json`, `annotation_agreement.json`, `annotation_assignments.json`, and `classification.json`. Deprecated Claude 15-step annotations and debugger model output folders are intentionally excluded from this release.
 
 ## Quickstart
 
