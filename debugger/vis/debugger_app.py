@@ -34,6 +34,7 @@ from debugger.config import load_config
 from debugger.taxonomy import ALL_SUBTYPES, SUBTYPE_DEFINITIONS
 from debugger.eval import compute_accuracy
 from debugger.memory.annotation_loader import load_debugger_refs
+from debugger.trajectory import infer_instruction_from_entry
 
 CONFIDENCE_OPTIONS = ["low", "mid", "high"]
 
@@ -48,6 +49,29 @@ _PATH_COMPONENT_ALIASES = {
 }
 
 
+def _windows_long_path(path: str | Path) -> str:
+    """Return a Windows extended-length path when needed."""
+    resolved = str(Path(path).resolve(strict=False))
+    if os.name != "nt" or resolved.startswith("\\\\?\\"):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved[2:]
+    return "\\\\?\\" + resolved
+
+
+def _path_exists(path: str | Path) -> bool:
+    return os.path.exists(_windows_long_path(path))
+
+
+def _has_annotation_artifact(d: Path) -> bool:
+    return (
+        (d / "annotations").exists()
+        or (d / "annotation_assignments.json").exists()
+        or (d / "classification.json").exists()
+        or (d / "repeat").exists()
+    )
+
+
 def _remap_path(p: str | None) -> str | None:
     """Resolve any path to a local path under PROJECT_ROOT.
 
@@ -58,7 +82,7 @@ def _remap_path(p: str | None) -> str | None:
     """
     if not p:
         return p
-    if Path(p).exists():
+    if _path_exists(p):
         return p
     # Normalize backslashes to forward slashes for consistent matching
     normalized = p.replace("\\", "/")
@@ -71,20 +95,20 @@ def _remap_path(p: str | None) -> str | None:
         if os.name == "nt":
             rel = rel.replace(":", "_")
         candidate = str(PROJECT_ROOT / rel)
-        if Path(candidate).exists():
+        if _path_exists(candidate):
             return candidate
         parts = Path(rel).parts
         aliased_parts = tuple(_PATH_COMPONENT_ALIASES.get(part, part) for part in parts)
         if aliased_parts != parts:
             alias_candidate = str(PROJECT_ROOT.joinpath(*aliased_parts))
-            if Path(alias_candidate).exists():
+            if _path_exists(alias_candidate):
                 return alias_candidate
         return candidate
     return p
 
 # â”€â”€ Page config â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-st.set_page_config(layout="wide", page_title="Debugger Vis", page_icon="ðŸ”")
+st.set_page_config(layout="wide", page_title="Debugger Vis")
 
 st.markdown("""
 <style>
@@ -287,17 +311,24 @@ def _discover_debugger_trial_dirs() -> list[Path]:
 
 def _discover_agent_trial_dirs() -> list[Path]:
     """Discover agent-level trials, grouping sibling debugger runs together."""
-    def has_debugger_refs(agent: Path) -> bool:
-        return (agent / "rca").is_dir() or bool(_debugger_trial_dirs_for_agent(agent))
+    def has_agent_data(agent: Path) -> bool:
+        return (
+            _has_annotation_artifact(agent)
+            or (agent / "rca").is_dir()
+            or bool(_debugger_trial_dirs_for_agent(agent))
+        )
 
     def newest_ref_mtime(agent: Path) -> float:
         debugger_dirs = _debugger_trial_dirs_for_agent(agent)
-        if not debugger_dirs:
-            return agent.stat().st_mtime
-        return max(d.stat().st_mtime for d in debugger_dirs)
+        candidates = [d.stat().st_mtime for d in debugger_dirs]
+        for name in ("annotations", "annotation_assignments.json", "classification.json", "repeat"):
+            p = agent / name
+            if p.exists():
+                candidates.append(p.stat().st_mtime)
+        return max(candidates) if candidates else agent.stat().st_mtime
 
     return _sort_by_mtime(
-        [top for top in _output_trial_roots() if has_debugger_refs(top)],
+        [top for top in _output_trial_roots() if has_agent_data(top)],
         key=newest_ref_mtime,
     )
 
@@ -349,6 +380,146 @@ def load_rca_results_for_agent(agent_dir: str | Path | None = None) -> list[dict
                 by_task[task_id] = r
     results = list(by_task.values())
     results.sort(key=lambda r: (r.get("total_steps", 0), r.get("created_at", "")), reverse=True)
+    if not results:
+        return load_annotation_results_for_agent(agent_dir)
+    return results
+
+
+def _confidence_to_float(value) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        return {"high": 0.9, "mid": 0.7, "medium": 0.7, "low": 0.5}.get(value.lower(), 0.0)
+    return 0.0
+
+
+def _task_id_from_path(path: str) -> str:
+    return path.replace("\\", "/").rstrip("/").split("/")[-1]
+
+
+def _app_id_from_path(path: str) -> str:
+    parts = [p for p in path.replace("\\", "/").split("/") if p]
+    return parts[-2] if len(parts) >= 2 else "unknown"
+
+
+def _classification_lookup(agent_dir: str | Path) -> dict[str, dict]:
+    """Map task_id to trajectory metadata from classification.json."""
+    path = _agent_dir(agent_dir) / "classification.json"
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    lookup: dict[str, dict] = {}
+    for status, paths in data.get("trajectories", {}).items():
+        if not isinstance(paths, list):
+            continue
+        for raw_path in paths:
+            if not isinstance(raw_path, str):
+                continue
+            lookup[_task_id_from_path(raw_path)] = {
+                "traj_path": _remap_path(raw_path) or raw_path,
+                "app_id": _app_id_from_path(raw_path),
+                "status": status,
+            }
+    return lookup
+
+
+def _trajectory_preview(traj_path: str | None) -> tuple[int, str]:
+    if not traj_path:
+        return 0, ""
+    traj_dir = Path(traj_path)
+    for name in ("traj.jsonl", "trajectory.jsonl"):
+        fpath = traj_dir / name
+        if not _path_exists(fpath):
+            continue
+        count = 0
+        instruction = ""
+        try:
+            with open(_windows_long_path(fpath), encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if not instruction:
+                            instruction = infer_instruction_from_entry(entry)
+                        if "step_num" in entry:
+                            count += 1
+                    except json.JSONDecodeError:
+                        continue
+            return count, instruction
+        except OSError:
+            return 0, ""
+    return 0, ""
+
+
+def _count_trajectory_steps(traj_path: str | None) -> int:
+    return _trajectory_preview(traj_path)[0]
+
+
+def load_annotation_results_for_agent(agent_dir: str | Path | None = None) -> list[dict]:
+    """Build viewer task rows from human annotations when RCA JSON is absent."""
+    if not agent_dir:
+        return []
+
+    agent = _agent_dir(agent_dir)
+    ann_dir = agent / "annotations"
+    if not ann_dir.is_dir():
+        return []
+
+    class_by_task = _classification_lookup(agent)
+    results: list[dict] = []
+    for ann_file in sorted(ann_dir.glob("human_*.json")):
+        try:
+            with open(ann_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        task_id = payload.get("task_id") or ann_file.stem.removeprefix("human_")
+        human_values = payload.get("human_values", [])
+        if isinstance(human_values, list):
+            first_human = human_values[0] if human_values else {}
+        elif isinstance(human_values, dict):
+            first_human = human_values
+        else:
+            first_human = {}
+        llm_values = payload.get("llm_values") if isinstance(payload.get("llm_values"), dict) else {}
+        values = llm_values or first_human
+        if not values:
+            continue
+
+        meta = class_by_task.get(task_id, {})
+        traj_path = meta.get("traj_path", "")
+        root_step = int(values.get("root_error_step") or first_human.get("root_error_step") or 1)
+        step_count, inferred_instruction = _trajectory_preview(traj_path)
+        total_steps = max(step_count, root_step, 1)
+        results.append(
+            {
+                "task_id": task_id,
+                "instruction": payload.get("instruction") or inferred_instruction,
+                "traj_path": traj_path,
+                "app_id": meta.get("app_id", "unknown"),
+                "status": meta.get("status", "annotated"),
+                "root_error_step": root_step,
+                "taxonomy_tag": values.get("taxonomy_tag") or first_human.get("taxonomy_tag") or "Other",
+                "evidence": values.get("evidence") or first_human.get("evidence") or "",
+                "correction": values.get("correction") or first_human.get("correction") or "",
+                "confidence": _confidence_to_float(values.get("confidence") or first_human.get("confidence")),
+                "model": "annotation",
+                "total_steps": total_steps,
+                "terminal_step": total_steps,
+                "created_at": datetime.fromtimestamp(ann_file.stat().st_mtime).isoformat(),
+                "steps": [],
+            }
+        )
+
+    results.sort(key=lambda r: (r.get("app_id", ""), r.get("task_id", "")))
     return results
 
 
@@ -434,17 +605,9 @@ def _agent_dir(trial_dir: str | Path) -> Path:
     """
     p = Path(trial_dir)
 
-    def _has_artifact(d: Path) -> bool:
-        return (
-            (d / "annotations").exists()
-            or (d / "annotation_assignments.json").exists()
-            or (d / "classification.json").exists()
-            or (d / "repeat").exists()
-        )
-
-    if _has_artifact(p):
+    if _has_annotation_artifact(p):
         return p
-    if _has_artifact(p.parent):
+    if _has_annotation_artifact(p.parent):
         return p.parent
     if p.is_dir() and any((c / "rca").is_dir() for c in p.iterdir() if c.is_dir()):
         return p
@@ -683,6 +846,19 @@ def draw_click_marker(img: Image.Image, x, y) -> Image.Image:
     draw.ellipse((x - r, y - r, x + r, y + r), outline=color, width=5)
     draw.ellipse((x - 3, y - 3, x + 3, y + 3), fill=color)
     return img
+
+
+def step_status_display(step_num: int, root_step: int, has_error: bool) -> tuple[str, str, str]:
+    """Return CSS class, status label, and visible heading for a trajectory step."""
+    if step_num == root_step:
+        css_class, label = "root-step", "ROOT CAUSE"
+    elif step_num > root_step and has_error:
+        css_class, label = "cascade-step", "CASCADED"
+    elif has_error:
+        css_class, label = "cascade-step", "ERROR"
+    else:
+        css_class, label = "normal-step", "OK"
+    return css_class, label, f"Step {step_num} - {label}"
 
 
 # â”€â”€ Discussion panel helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -1120,7 +1296,7 @@ def _render_accuracy_dashboard(trial_dir: str):
 # â”€â”€ Main â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def main():
-    st.sidebar.title("ðŸ” Debugger Vis")
+    st.sidebar.title("Debugger Vis")
 
     # â”€â”€ Mode selector â”€â”€
     mode = st.sidebar.radio("Mode", ["RCA Viewer", "Accuracy"], horizontal=True)
@@ -1401,16 +1577,16 @@ def main():
 
     nav_prev, nav_next = st.sidebar.columns(2)
     with nav_prev:
-        st.button("â¬… Prev", disabled=(sel_idx == 0), use_container_width=True,
+        st.button("Prev", disabled=(sel_idx == 0), use_container_width=True,
                   on_click=_nav, args=(-1,))
     with nav_next:
-        st.button("Next âž¡", disabled=(sel_idx == len(filtered) - 1), use_container_width=True,
+        st.button("Next", disabled=(sel_idx == len(filtered) - 1), use_container_width=True,
                   on_click=_nav, args=(1,))
 
     # â”€â”€ Discussion Panel Controls â”€â”€
     st.sidebar.markdown("---")
     show_discuss = st.sidebar.toggle(
-        "ðŸ’¬ Discussion Panel", value=False, key="_show_discuss",
+        "Discussion Panel", value=False, key="_show_discuss",
     )
 
     # â”€â”€ Resolve trajectory path once (used everywhere below) â”€â”€
@@ -1421,13 +1597,13 @@ def main():
         main_col, discuss_col = adjustable_columns(
             [3, 1],
             gap="large",
-            labels=["Main Content", "ðŸ’¬ Discussion"],
+            labels=["Main Content", "Discussion"],
             key="_discuss_resize",
         )
         with discuss_col:
             st.markdown(
                 '<div class="discuss-header">'
-                '<span class="discuss-icon">ðŸ’¬</span> Discuss with Debugger'
+                '<span class="discuss-icon">Chat</span> Discuss with Debugger'
                 '</div>',
                 unsafe_allow_html=True,
             )
@@ -1452,7 +1628,7 @@ def main():
                 st.caption(f"Source: `{rel}`")
             with btn_col:
                 abs_path = os.path.abspath(traj_path)
-                st.link_button("ðŸ“‚ Open Trajectory", f"vscode://file{abs_path}", use_container_width=True)
+                st.link_button("Open Trajectory", f"vscode://file{abs_path}", use_container_width=True)
 
         # Load annotation for current task (scoped by annotator)
         _current_annotator = st.session_state.get("annotator_name", "").strip()
@@ -1760,9 +1936,9 @@ def main():
         # â”€â”€ Recording Video â”€â”€
         if traj_path:
             recording_path = Path(traj_path) / "recording.mp4"
-            if recording_path.exists():
+            if _path_exists(recording_path):
                 with st.expander("Recording", expanded=False):
-                    st.video(str(recording_path))
+                    st.video(_windows_long_path(recording_path))
 
         # â”€â”€ Trajectory â”€â”€
         root_step = task["root_error_step"]
@@ -1773,13 +1949,13 @@ def main():
         # Display options â€” horizontal row
         opt1, opt2, opt3, opt4 = st.columns(4)
         with opt1:
-            show_only_errors = st.checkbox("ðŸ”´ Show only error steps", value=False)
+            show_only_errors = st.checkbox("Show only error steps", value=False)
         with opt2:
-            show_coords = st.checkbox("ðŸ“ Show click coordinates", value=True)
+            show_coords = st.checkbox("Show click coordinates", value=True)
         with opt3:
-            show_a11y = st.checkbox("ðŸŒ³ Show a11y tree (LLM input)", value=False)
+            show_a11y = st.checkbox("Show a11y tree (LLM input)", value=False)
         with opt4:
-            expand_reasoning = st.checkbox("ðŸ§  Expand all reasoning", value=False)
+            expand_reasoning = st.checkbox("Expand all reasoning", value=False)
 
         st.caption("Note: Coordinates are normalized to model-scale via load_normalized_trajectory(). Actual executed coordinates in traj.jsonl may differ (screen-scale).")
 
@@ -1795,23 +1971,15 @@ def main():
             is_cascade = step_num > root_step and step.get("error")
             has_error = bool(step.get("error"))
 
-            if is_root:
-                css_class, label, icon = "root-step", "ROOT CAUSE", "ðŸ”´"
-            elif is_cascade:
-                css_class, label, icon = "cascade-step", "CASCADED", "ðŸŸ¡"
-            elif has_error:
-                css_class, label, icon = "cascade-step", "ERROR", "ðŸŸ¡"
-            else:
-                css_class, label, icon = "normal-step", "OK", "ðŸŸ¢"
-
+            css_class, label, step_heading = step_status_display(step_num, root_step, has_error)
             st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
 
             col_img, col_detail = st.columns([1.5, 1])
 
             with col_img:
                 screenshot_path = step.get("screenshot")
-                if screenshot_path and os.path.exists(screenshot_path):
-                    img = Image.open(screenshot_path)
+                if screenshot_path and _path_exists(screenshot_path):
+                    img = Image.open(_windows_long_path(screenshot_path))
                     caption_parts = [f"Step {step_num}"]
 
                     if show_coords and step.get("action_code"):
@@ -1822,10 +1990,10 @@ def main():
 
                     st.image(img, caption=" | ".join(caption_parts), use_container_width=True)
                 else:
-                    st.caption(f"Step {step_num} â€” no screenshot")
+                    st.caption(f"Step {step_num} - no screenshot")
 
             with col_detail:
-                st.markdown(f"#### {icon} Step {step_num} â€” {label}")
+                st.markdown(f"#### {step_heading}")
 
                 # Action code
                 if step.get("action_code"):
@@ -1861,7 +2029,7 @@ def main():
 
                 # Agent reasoning (from raw_response / response / plan fields)
                 if reasoning:
-                    with st.expander("ðŸ§  Agent Reasoning (LLM Response)", expanded=expand_reasoning):
+                    with st.expander("Agent Reasoning (LLM Response)", expanded=expand_reasoning):
                         # Parse [THINKING] and [TEXT] sections. Tool use is shown separately.
                         thinking = ""
                         text = ""
@@ -1875,10 +2043,10 @@ def main():
                             text = text_match.group(1).strip()
 
                         if thinking:
-                            st.markdown("**ðŸ’­ THINKING:**")
+                            st.markdown("**THINKING:**")
                             st.info(thinking[:800])
                         if text:
-                            st.markdown("**ðŸ’¬ TEXT:**")
+                            st.markdown("**TEXT:**")
                             st.success(text[:500])
 
                         # Fallback: show raw if no sections found
@@ -1901,7 +2069,7 @@ def main():
                     ts = raw.get("action_timestamp", "")
                     a11y_text = load_a11y_tree(traj_path, step_num, ts)
                     if a11y_text:
-                        with st.expander(f"ðŸŒ³ A11y Tree (LLM Input) â€” {len(a11y_text)} chars"):
+                        with st.expander(f"A11y Tree (LLM Input) - {len(a11y_text)} chars"):
                             st.code(a11y_text[:3000], language="text")
 
                 # RCA evidence inline for root step
@@ -1911,9 +2079,8 @@ def main():
             st.markdown('</div>', unsafe_allow_html=True)
             st.markdown("")
 
-        # â”€â”€ Debugger Memory & Analysis Detail â”€â”€
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-        st.subheader("ðŸ“Š Debugger Memory")
+        st.subheader("Debugger Memory")
 
         # Episodic memory record
         task_memory = [r for r in memory_records if r.get("task_id") == task["task_id"]]
@@ -1967,22 +2134,21 @@ def main():
 
         # All memory records overview
         if len(memory_records) > 1:
-            with st.expander(f"ðŸ“‹ All Memory Records ({len(memory_records)} total)"):
+            with st.expander(f"All Memory Records ({len(memory_records)} total)"):
                 for rec in sorted(memory_records, key=lambda r: r.get("created_at", "")):
                     type_label = {"Type1": "Failed", "Type2": "Successful", "Type3": "Debugged-success"}.get(rec["type"], rec["type"])
                     type_class = {"Type1": "tag-error", "Type2": "tag-ok", "Type3": "tag-purple"}.get(rec["type"], "tag-info")
                     is_current = rec.get("task_id") == task["task_id"]
-                    marker = " â† current" if is_current else ""
+                    marker = " <- current" if is_current else ""
                     st.markdown(
                         f'<span class="tag {type_class}">{type_label}</span> '
-                        f'`{rec.get("task_id", "?")[:12]}...` â€” '
+                        f'`{rec.get("task_id", "?")[:12]}...` - '
                         f'{rec["steps_count"]} steps, terminal {rec["terminal_step"]} '
                         f'`{rec["created_at"][:19]}`{marker}',
                         unsafe_allow_html=True,
                     )
 
-        # â”€â”€ Raw JSON â”€â”€
-        with st.expander("ðŸ”§ Raw RCA JSON"):
+        with st.expander("Raw RCA JSON"):
             display = {k: v for k, v in task.items() if k != "steps"}
             st.json(display)
 

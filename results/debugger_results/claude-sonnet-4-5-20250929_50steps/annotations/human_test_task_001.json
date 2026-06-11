@@ -2,5 +2,6 @@
   "task_id": "test_task_001",
   "root_cause": "perception_error",
   "evidence": "Agent failed to detect button location",
-  "label": "Perception.VisualMisread"
+  "label": "Perception.VisualMisread",
+  "human_values": []
 }

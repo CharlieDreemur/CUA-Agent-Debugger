@@ -21,6 +21,7 @@ Supports two on-disk formats:
 import base64
 import io
 import json
+import os
 import re
 from pathlib import Path
 from typing import Optional
@@ -34,14 +35,33 @@ _TAGGED_TOOL_USE_RE = re.compile(
     r"\[TOOL_USE\]\s*(.*?)(?=\[THINKING\]|\[TEXT\]|\[OTHER\]|\Z)",
     re.DOTALL,
 )
+_TASK_INTENT_PATTERNS = (
+    re.compile(r"\bThe user wants me to\s+(.+?)(?:[.!?](?:\s|$)|$)", re.IGNORECASE),
+    re.compile(r"\b(?:The )?user (?:asked|wants) (?:me )?to\s+(.+?)(?:[.!?](?:\s|$)|$)", re.IGNORECASE),
+    re.compile(r"\bI(?:'ll| will) help you\s+(.+?)(?:[.!?](?:\s|$)|$)", re.IGNORECASE),
+)
+_INSTRUCTION_KEYS = ("instruction", "task_instruction", "goal", "objective")
+
+
+def _windows_long_path(path: Path) -> str:
+    resolved = str(Path(path).resolve(strict=False))
+    if os.name != "nt" or resolved.startswith("\\\\?\\"):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved[2:]
+    return "\\\\?\\" + resolved
+
+
+def _path_exists(path: Path) -> bool:
+    return os.path.exists(_windows_long_path(path))
 
 
 def _read_image_b64(path: Optional[Path]) -> Optional[str]:
-    if not path or not path.exists():
+    if not path or not _path_exists(path):
         return None
     try:
         from PIL import Image
-        img = Image.open(path)
+        img = Image.open(_windows_long_path(path))
         # Resize if too large
         if max(img.size) > _MAX_SCREENSHOT_DIM:
             img.thumbnail((_MAX_SCREENSHOT_DIM, _MAX_SCREENSHOT_DIM), Image.LANCZOS)
@@ -50,7 +70,7 @@ def _read_image_b64(path: Optional[Path]) -> Optional[str]:
         return base64.standard_b64encode(buf.getvalue()).decode("utf-8")
     except ImportError:
         # Fallback: send raw if Pillow not available
-        with open(path, "rb") as f:
+        with open(_windows_long_path(path), "rb") as f:
             return base64.standard_b64encode(f.read()).decode("utf-8")
 
 
@@ -105,6 +125,63 @@ def _as_text(value) -> str:
         return json.dumps(value, ensure_ascii=False, indent=2)
     except TypeError:
         return str(value).strip()
+
+
+def _format_instruction(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip(" \"'")
+    if not text:
+        return ""
+    if text[0].islower():
+        text = text[0].upper() + text[1:]
+    if text[-1] not in ".!?":
+        text += "."
+    return text
+
+
+def infer_instruction_from_text(value) -> str:
+    """Best-effort instruction recovery from model text when metadata is absent."""
+    text = _as_text(value)
+    if not text:
+        return ""
+    text = re.sub(r"\[[A-Z_]+\]\s*", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    for pattern in _TASK_INTENT_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return _format_instruction(match.group(1))
+    return ""
+
+
+def infer_instruction_from_entry(entry: dict) -> str:
+    """Recover an instruction from a JSONL entry if it carries one."""
+    for key in _INSTRUCTION_KEYS:
+        direct = _as_text(entry.get(key))
+        if direct:
+            return _format_instruction(direct)
+
+    info = entry.get("info", {})
+    if isinstance(info, dict):
+        for key in _INSTRUCTION_KEYS:
+            direct = _as_text(info.get(key))
+            if direct:
+                return _format_instruction(direct)
+
+    action_raw = entry.get("action", {})
+    candidates = []
+    if isinstance(action_raw, dict):
+        candidates.append(action_raw.get("raw_response"))
+    candidates.extend(
+        [
+            entry.get("response"),
+            entry.get("full_plan"),
+            entry.get("reflection"),
+        ]
+    )
+    for candidate in candidates:
+        instruction = infer_instruction_from_text(candidate)
+        if instruction:
+            return instruction
+    return ""
 
 
 def _append_reasoning_section(parts: list[str], seen: set[str], label: str, value) -> None:
@@ -197,9 +274,9 @@ def load_trajectory(traj_dir: Path) -> dict:
     # --- detect format ---
     claude_traj = traj_dir / "traj.jsonl"
     legacy_traj = traj_dir / "trajectory.jsonl"
-    if claude_traj.exists():
+    if _path_exists(claude_traj):
         fmt, jsonl_path = "claude", claude_traj
-    elif legacy_traj.exists():
+    elif _path_exists(legacy_traj):
         fmt, jsonl_path = "legacy", legacy_traj
     else:
         raise FileNotFoundError(
@@ -233,9 +310,10 @@ def load_trajectory(traj_dir: Path) -> dict:
     # --- result score ---
     result_score = None
     result_txt = traj_dir / "result.txt"
-    if result_txt.exists():
+    if _path_exists(result_txt):
         try:
-            result_score = float(result_txt.read_text(encoding="utf-8").strip())
+            with open(_windows_long_path(result_txt), encoding="utf-8") as f:
+                result_score = float(f.read().strip())
         except ValueError:
             pass
 
@@ -243,7 +321,7 @@ def load_trajectory(traj_dir: Path) -> dict:
     steps: list[dict] = []
     system_errors: list[str] = []
 
-    with open(jsonl_path, encoding="utf-8") as f:
+    with open(_windows_long_path(jsonl_path), encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -252,6 +330,9 @@ def load_trajectory(traj_dir: Path) -> dict:
                 entry = json.loads(line)
             except json.JSONDecodeError:
                 continue
+
+            if not instruction:
+                instruction = infer_instruction_from_entry(entry)
 
             # lines with an Error key but no step_num are system-level failures
             if "Error" in entry and "step_num" not in entry:
@@ -281,12 +362,12 @@ def load_trajectory(traj_dir: Path) -> dict:
                 sf = entry.get("screenshot_file", "")
                 if sf:
                     p = traj_dir / sf
-                    if p.exists():
+                    if _path_exists(p):
                         screenshot_path = p
             else:
                 ts = entry.get("action_timestamp", "")
                 p = traj_dir / "screenshots" / f"step_{step_num}_{ts}.png"
-                if p.exists():
+                if _path_exists(p):
                     screenshot_path = p
 
             steps.append(
