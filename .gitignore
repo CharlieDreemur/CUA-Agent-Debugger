@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local secrets and configs
+.env
+.env.*
+!/.env.example
+debugger/config/debugger.json
+
+# Runtime outputs
+results/
+logs/
+analysis_results/
+sample_data/debugger_results/*/*/discussions/
+sample_data/debugger_results/*/*/summary.json
+sample_data/debugger_results/*/*/episodic.json
+
+# Large/generated artifacts intentionally excluded from the minimal release
+*.log
+*.bak
+*.tmp
+.DS_Store

@@ -1,0 +1,13 @@
+{
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "base_urls": {},
+  "trajectory_dir": "sample_data/trajectories",
+  "output_dir": "sample_data/debugger_results",
+  "trial_name": "sample",
+  "workers": 1,
+  "skip_existing": true,
+  "rca_thinking_budget": 16000,
+  "rca_max_tokens": 16000,
+  "rca_max_turns": 60
+}
