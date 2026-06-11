@@ -45,3 +45,33 @@ def test_safe_extract_zip_extracts_regular_members(tmp_path):
 
     assert (tmp_path / "out" / "trial" / "task" / "traj.jsonl").read_text(encoding="utf-8") == "{}\n"
     assert extracted == [tmp_path / "out" / "trial" / "task" / "traj.jsonl"]
+
+
+def test_safe_extract_zip_sanitizes_windows_member_names(tmp_path):
+    module = _load_downloader_module()
+    archive = tmp_path / "windows-name.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("trial/model:v1/traj.jsonl", "{}\n")
+
+    extracted = module.safe_extract_zip(archive, tmp_path / "out")
+
+    model_dir = "model_v1" if module.os.name == "nt" else "model:v1"
+    expected = tmp_path / "out" / "trial" / model_dir / "traj.jsonl"
+    assert expected.read_text(encoding="utf-8") == "{}\n"
+    assert extracted == [expected]
+
+
+def test_safe_extract_zip_handles_deep_member_paths(tmp_path):
+    module = _load_downloader_module()
+    archive = tmp_path / "deep.zip"
+    deep_parts = [f"segment{i:02d}" for i in range(25)]
+    member_name = "/".join(["trial", *deep_parts, "traj.jsonl"])
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr(member_name, "{}\n")
+
+    extracted = module.safe_extract_zip(archive, tmp_path / "out")
+
+    expected = tmp_path / "out" / "trial" / Path(*deep_parts) / "traj.jsonl"
+    with open(module._windows_long_path(expected), encoding="utf-8") as f:
+        assert f.read() == "{}\n"
+    assert extracted == [expected]

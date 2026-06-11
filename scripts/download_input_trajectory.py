@@ -7,6 +7,8 @@ https://huggingface.co/datasets/xlangai/ubuntu_osworld_verified_trajs/blob/main/
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 import sys
 import urllib.error
 import urllib.request
@@ -35,6 +37,37 @@ def _is_within_directory(base: Path, target: Path) -> bool:
         return False
 
 
+def _windows_long_path(path: Path) -> str:
+    """Return a Windows extended-length path when needed."""
+    resolved = str(Path(path).resolve(strict=False))
+    if os.name != "nt" or resolved.startswith("\\\\?\\"):
+        return resolved
+    if resolved.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + resolved[2:]
+    return "\\\\?\\" + resolved
+
+
+def _zip_member_target(output_dir: Path, member_name: str) -> Path:
+    """Map a zip member name to a safe local target path."""
+    raw_target = output_dir / member_name
+    if not _is_within_directory(output_dir, raw_target):
+        raise ValueError(f"Unsafe zip member path: {member_name}")
+
+    parts = [p for p in member_name.replace("\\", "/").split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise ValueError(f"Unsafe zip member path: {member_name}")
+
+    if os.name == "nt":
+        illegal = ':<>|"?*'
+        table = str.maketrans(illegal, "_" * len(illegal))
+        parts = [p.translate(table).rstrip(".") for p in parts]
+
+    target = output_dir.joinpath(*parts) if parts else output_dir
+    if not _is_within_directory(output_dir, target):
+        raise ValueError(f"Unsafe zip member path: {member_name}")
+    return target
+
+
 def safe_extract_zip(archive_path: Path, output_dir: Path) -> list[Path]:
     """Extract a zip file while rejecting members that escape output_dir."""
     archive_path = Path(archive_path)
@@ -44,12 +77,15 @@ def safe_extract_zip(archive_path: Path, output_dir: Path) -> list[Path]:
     extracted: list[Path] = []
     with zipfile.ZipFile(archive_path) as zf:
         for member in zf.infolist():
-            target = output_dir / member.filename
-            if not _is_within_directory(output_dir, target):
-                raise ValueError(f"Unsafe zip member path: {member.filename}")
-            zf.extract(member, output_dir)
-            if not member.is_dir():
-                extracted.append(target)
+            target = _zip_member_target(output_dir, member.filename)
+            if member.is_dir():
+                os.makedirs(_windows_long_path(target), exist_ok=True)
+                continue
+
+            os.makedirs(_windows_long_path(target.parent), exist_ok=True)
+            with zf.open(member) as src, open(_windows_long_path(target), "wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            extracted.append(target)
     return extracted
 
 
